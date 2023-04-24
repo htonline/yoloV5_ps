@@ -6,6 +6,7 @@ Usage:
     $ python models/yolo.py --cfg yolov5s.yaml
 """
 
+"""--------------------导入python库和模块--------------------"""
 import argparse
 import contextlib
 import os
@@ -34,6 +35,8 @@ try:
 except ImportError:
     thop = None
 
+
+"""--------------------定义了一些类和函数--------------------"""
 
 class Detect(nn.Module):
     # YOLOv5 Detect head for detection models
@@ -162,6 +165,7 @@ class BaseModel(nn.Module):
         return self
 
 
+# Model
 class DetectionModel(BaseModel):
     # YOLOv5 detection model
     def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, anchors=None):  # model, input channels, number of classes
@@ -357,6 +361,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
 
 if __name__ == '__main__':
+    # 定义参数信息
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg', type=str, default='yolov5s.yaml', help='model.yaml')
     parser.add_argument('--batch-size', type=int, default=1, help='total batch size for all GPUs')
@@ -370,10 +375,12 @@ if __name__ == '__main__':
     device = select_device(opt.device)
 
     # Create model
-    im = torch.rand(opt.batch_size, 3, 640, 640).to(device)
-    model = Model(opt.cfg).to(device)
+    # 创建yolo5模型
+    im = torch.rand(opt.batch_size, 3, 640, 640).to(device)     # 随机定义了一张图片
+    model = Model(opt.cfg).to(device)                           # 模型初始化
 
     # Options
+    # 针对创建的模型, 做了一些额外的操作
     if opt.line_profile:  # profile layer by layer
         model(im, profile=True)
 
