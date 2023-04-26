@@ -4,7 +4,11 @@ Train a YOLOv5 model on a custom dataset.
 Models and datasets download automatically from the latest YOLOv5 release.
 
 Usage - Single-GPU training:
+    # 1.使用预训练好的权重文件yolov5s.pt这个权重文件来进行模型的训练; 数据集是coco128.yaml; --img:表示传入的图片大小
     $ python train.py --data coco128.yaml --weights yolov5s.pt --img 640  # from pretrained (recommended)
+
+    # 2.区别在于不是加载预训练好的权重文件,在权重文件的基础上去训练;
+    # 而是通过config来传入所使用的网络结构, 根据配置文件从0开始搭建模型,从头开始训练;
     $ python train.py --data coco128.yaml --weights '' --cfg yolov5s.yaml --img 640  # from scratch
 
 Usage - Multi-GPU DDP training:
@@ -60,6 +64,7 @@ from utils.plots import plot_evolve
 from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, select_device, smart_DDP, smart_optimizer,
                                smart_resume, torch_distributed_zero_first)
 
+# 以下这些变量,主要是用来做分布式训练用的; 一台电脑一张GPU卡的话, 就默认即可
 LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
@@ -67,17 +72,26 @@ GIT_INFO = check_git_info()
 
 
 def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
+    # 读取opt中的值赋给临时变量
     save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
         opt.resume, opt.noval, opt.nosave, opt.workers, opt.freeze
+
+    # 执行日志记录器中的on_pretrain_routine_start方法
+    # 如果没有这个方法, 则什么也不会执行
     callbacks.run('on_pretrain_routine_start')
 
     # Directories
+    # 训练结果保存的目录(exp123), 训练过程中产生的权重文件
     w = save_dir / 'weights'  # weights dir
+    # 判断weights文件夹是否存在; 否的话就创建
     (w.parent if evolve else w).mkdir(parents=True, exist_ok=True)  # make dir
+
+    # 比如训练300轮, last:最后一轮的权重文件, best:训练效果最好的权重文件
     last, best = w / 'last.pt', w / 'best.pt'
 
     # Hyperparameters
+    # 加载训练过程中使用到的超参数, 打印
     if isinstance(hyp, str):
         with open(hyp, errors='ignore') as f:
             hyp = yaml.safe_load(f)  # load hyps dict
@@ -85,16 +99,20 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     opt.hyp = hyp.copy()  # for saving hyps to checkpoints
 
     # Save run settings
+    # 将运行过程中的配置环境保存下来
     if not evolve:
-        yaml_save(save_dir / 'hyp.yaml', hyp)
-        yaml_save(save_dir / 'opt.yaml', vars(opt))
+        yaml_save(save_dir / 'hyp.yaml', hyp)       # 超参数
+        yaml_save(save_dir / 'opt.yaml', vars(opt)) # 命令行使用的参数 && 默认使用的参数
 
     # Loggers
+    # 日志记录工具
     data_dict = None
     if RANK in {-1, 0}:
         loggers = Loggers(save_dir, weights, opt, hyp, LOGGER)  # loggers instance
 
         # Register actions
+        # 遍历日志记录器中的所有方法, 将字符串与方法进行绑定
+        # callbacks.run('on_pretrain_routine_start'), 如此可以调用对应的方法
         for k in methods(loggers):
             callbacks.register_action(k, callback=getattr(loggers, k))
 
@@ -104,27 +122,42 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             weights, epochs, hyp, batch_size = opt.weights, opt.epochs, opt.hyp, opt.batch_size
 
     # Config
+    # 是否将训练过程中的图表画出来
     plots = not evolve and not opt.noplots  # create plots
+    # 电脑是否支持cuda
     cuda = device.type != 'cpu'
+    # 初始随机化种子, 保证训练过程是可复现的
     init_seeds(opt.seed + 1 + RANK, deterministic=True)
+    # 分布式训练相关
     with torch_distributed_zero_first(LOCAL_RANK):
+        # 检查数据集是否存在, 没有的话去下载并放到对应的目录下
         data_dict = data_dict or check_dataset(data)  # check if None
+    # 取出训练集和验证集的路径
     train_path, val_path = data_dict['train'], data_dict['val']
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = {0: 'item'} if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     is_coco = isinstance(val_path, str) and val_path.endswith('coco/val2017.txt')  # COCO dataset
 
     # Model
+    # 模型加载
+    # 是否以.pt结尾; 是的话说明要使用这个预训练权重
     check_suffix(weights, '.pt')  # check weights
     pretrained = weights.endswith('.pt')
     if pretrained:
         with torch_distributed_zero_first(LOCAL_RANK):
+            # 如果本地没有,就去官网下
             weights = attempt_download(weights)  # download if not found locally
+        # 加载权重文件
         ckpt = torch.load(weights, map_location='cpu')  # load checkpoint to CPU to avoid CUDA memory leak
+        # 根据pt配置文件，创建新模型
         model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
         exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
+
+        # 将预训练模型的所有参数加载进来
         csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
+        # 比较预训练模型和自己创建的模型参数
         csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
+        # 加载相同参数. 利用预训练好的权重，来训练自己的数据集
         model.load_state_dict(csd, strict=False)  # load
         LOGGER.info(f'Transferred {len(csd)}/{len(model.state_dict())} items from {weights}')  # report
     else:
@@ -132,6 +165,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     amp = check_amp(model)  # check AMP
 
     # Freeze
+    # 冻结前几层的层号, 默认是[0], 不冻结
     freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
     for k, v in model.named_parameters():
         v.requires_grad = True  # train all layers
@@ -477,13 +511,20 @@ def parse_opt(known=False):
 
 
 def main(opt, callbacks=Callbacks()):
-    # Checks
+    """分为4部分"""
+
+    # Checks 1.校验工作
+    # RANK如果不进行分布式训练的话, 默认值就是-1;
     if RANK in {-1, 0}:
-        print_args(vars(opt))
-        check_git_status()
-        check_requirements()
+        print_args(vars(opt))       # 打印文件所用的参数信息
+        check_git_status()          # 检验YOLOv5的Github仓库中的代码是否更新; 更新的话会进行提示
+        check_requirements()        # 检测python依赖包是否安装成功
 
     # Resume (from specified or most recent last.pt)
+    # 2.判断在命令行中是否传入了resume这个参数, 来执行不同的操作;
+    # resum: 从中断中恢复; 比如想在某数据集上训练YOLOv5的模型,训练300轮;但当训练到200轮的时候电脑死机了.
+    # 恢复刚刚的实验环境,并继续完成未训练的100轮.
+    # yolov5s.pt是预训练好的预训练权重文件,已经训练完成了
     if opt.resume and not check_comet_resume(opt) and not opt.evolve:
         last = Path(check_file(opt.resume) if isinstance(opt.resume, str) else get_latest_run())
         opt_yaml = last.parent.parent / 'opt.yaml'  # train options yaml
@@ -498,19 +539,30 @@ def main(opt, callbacks=Callbacks()):
         if is_url(opt_data):
             opt.data = check_file(opt_data)  # avoid HUB resume auth timeout
     else:
+        # 检查配置文件的路径:数据集, config配置文件(网络结构配置文件), hyp超参数文件路径, 预训练权重(yolov5s.pt), 训练结果保存的路径
         opt.data, opt.cfg, opt.hyp, opt.weights, opt.project = \
             check_file(opt.data), check_yaml(opt.cfg), check_yaml(opt.hyp), str(opt.weights), str(opt.project)  # checks
+
+        # 检查config文件和weight文件是不是都为空; 是的话报错;
+        # 要么给网络结构的配置文件（告诉它网络是怎么创建）; 要么直接给预训练好的权重进行加载
         assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'
+
+
+        # 判断是否传入evolove这个参数; 如果传了的话, 就将训练的保存目录改为runs目录下的evolove
         if opt.evolve:
             if opt.project == str(ROOT / 'runs/train'):  # if default project name, rename to runs/evolve
                 opt.project = str(ROOT / 'runs/evolve')
             opt.exist_ok, opt.resume = opt.resume, False  # pass resume to exist_ok and disable resume
+
+        # 保存结果的文件名,增量路径(exp1, exp2, exp3 ...)
         if opt.name == 'cfg':
             opt.name = Path(opt.cfg).stem  # use model.yaml as name
         opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
 
     # DDP mode
+    # 3.选择CPU/GPU
     device = select_device(opt.device, batch_size=opt.batch_size)
+    # 假如采用的是分布式训练方式,则会进行一些额外的操作
     if LOCAL_RANK != -1:
         msg = 'is not compatible with YOLOv5 Multi-GPU DDP training'
         assert not opt.image_weights, f'--image-weights {msg}'
@@ -523,10 +575,17 @@ def main(opt, callbacks=Callbacks()):
         dist.init_process_group(backend="nccl" if dist.is_nccl_available() else "gloo")
 
     # Train
+    # 4.正式开始训练
+    #   是否用到evolve参数
     if not opt.evolve:
+        # 没有的话,就调用train这个函数进行训练
         train(opt.hyp, opt, device, callbacks)
 
-    # Evolve hyperparameters (optional)
+    # Evolve hyperparameters (optional) 进化超参数;
+    # 模型训练过程中,会用到非常多的参数:学习率..., 每个都手动调参会非常麻烦.
+    # 首先用默认参数进行训练, 然后用遗传算法改变超参数的值, 再训练;
+    # 最后得到多组不同超参数下的实验结果,最后挑选结果最好的;
+    # 但这种方法极其漫长且耗费算力; 对于大部分人,直接使用默认的超参数,配合手动调参即可获得不错的效果.
     else:
         # Hyperparameter evolution metadata (mutation scale 0-1, lower_limit, upper_limit)
         meta = {
@@ -629,5 +688,5 @@ def run(**kwargs):
 
 
 if __name__ == "__main__":
-    opt = parse_opt()
-    main(opt)
+    opt = parse_opt()       # 解析在训练过程中用到的参数
+    main(opt)               #
